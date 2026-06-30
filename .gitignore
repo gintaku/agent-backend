@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+ENV/
+.env
+.env.*
+.pytest_cache/
+coverage/
+htmlcov/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Node
+node_modules/
+.npm/
+yarn-error.log
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/*
+skills/*
+conversations/*
+workspace/*
+
+# front-end build
+frontend/dist/
+chroma_db/
+rag_docs/

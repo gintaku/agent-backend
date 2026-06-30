@@ -1,0 +1,46 @@
+[Score: 0.7589629292488098]
+GitHub Copilot Individual subscribers can opt-out of sharing their prompts with GitHub which will otherwise be used to finetune GitHub’s foundational model.
+Data handling for GitHub Copilot chat
+GitHub Copilot Chat operates as an interactive platform, allowing developers to engage in conversational interactions with the AI assistant to receive coding assistance. Here are the steps that it carries out which might be distinct from other features like code completion:
+- Formatting: Copilot meticulously formats the generated response for optimal presentation within the chat interface. It highlights code snippets to improve readability and may include options for direct integration into your code. Copilot showcases the formatted response in the Copilot Chat window within the IDE, allowing you to easily review and interact with the provided information.
+
+---
+
+[Score: 0.7798826694488525]
+GitHub Copilot Chat uses your code's context and semantics to suggest assertions that ensure the function is working correctly. It also helps you write test cases for edge cases and boundary conditions that might be difficult to identify manually. For example, GitHub Copilot Chat can suggest test cases for error handling, null values, or unexpected input types.
+
+---
+
+[Score: 0.7981331944465637]
+GitHub Copilot Chat uses your code's context and semantics to suggest assertions that ensure the function is working correctly. It also helps you write test cases for edge cases and boundary conditions that might be difficult to identify manually. For example, GitHub Copilot Chat can suggest test cases for error handling, null values, or unexpected input types.
+Important
+Generated test cases may not cover all possible scenarios. Manual testing and code reviews are necessary to ensure the quality of your code.
+GitHub Copilot support for unit testing
+GitHub Copilot can help with the following testing tasks:
+- Set up testing frameworks: get help configuring the right testing framework and Visual Studio Code extensions for your project and language.
+- Generate test code: create unit tests, integration tests, and end-to-end tests that cover your application code.
+- Handle edge cases: generate comprehensive test suites to cover edge cases and error conditions.
+
+---
+
+[Score: 0.7997403740882874]
+- Code quality: Responses are checked for common bugs or vulnerabilities, such as cross-site scripting (XSS) or SQL injection, ensuring that the generated code is robust and secure.
+- Matching public code (optional): Optionally, administrators can enable a filter that prevents Copilot from returning suggestions over ~150 characters if they closely resemble existing public code on GitHub. This prevents coincidental matches from being suggested as original content. If any part of the response fails these checks, it is either truncated or discarded.
+6. Suggestion delivery and feedback loop initiation
+Only responses that pass all filters are delivered to the user. Copilot then initiates a feedback loop based on your actions to achieve the following:
+- Grow its knowledge from accepted suggestions.
+- Learn and improve through modifications and rejections of its suggestions.
+7. Repeat for subsequent prompts
+
+---
+
+[Score: 0.8118467330932617]
+GitHub Copilot securely receives the user prompt, which could be a Copilot chat or a natural language comment provided by you within your code.
+Simultaneously, Copilot collects context details:
+- Code before and after the cursor position, which helps it understand the immediate context of the prompt.
+- Filename and type of the file being edited, allowing it to tailor code suggestions to the specific file type.
+- Information about adjacent open tabs, ensuring that the generated code aligns with other code segments in the same project.
+- Information on project structure and file paths
+- Information on programming languages and frameworks
+- Pre-processing using Fill-in-the-Middle (FIM) technique to consider both the preceding and following code context, effectively expanding the model's understanding allowing Copilot to generate more accurate and relevant code suggestions by leveraging a broader context.
+These steps translate the user's high-level request into a concrete coding task.

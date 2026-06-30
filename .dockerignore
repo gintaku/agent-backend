@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets — injected at runtime via k8s Secrets/ConfigMap
+.env
+.env.*
+
+# Data volumes — mounted via PersistentVolumeClaim in k8s
+chroma_db/
+conversations/
+logs/
+rag_docs/
+skills/
+workspace/
+
+# Tests
+tests/
+test_output.txt
+
+# Misc
+*.md
