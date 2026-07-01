@@ -62,14 +62,52 @@ _READ_ONLY_PREFIXES: tuple[str, ...] = (
     "uname",
 )
 
+# Any of these characters let a single string smuggle a second, unrelated
+# command past a prefix check (e.g. "echo hi; rm -rf workspace"). If any
+# appear, the command is NEVER treated as read-only, regardless of how it
+# starts — it always requires permission.
+_SHELL_METACHARACTERS = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "&")
+
+
+def _has_shell_metacharacters(command: str) -> bool:
+    return any(ch in command for ch in _SHELL_METACHARACTERS)
+
 
 def _is_read_only(command: str) -> bool:
-    """Return True when *command* is considered safe to run without permission."""
+    """Return True when *command* is considered safe to run without permission.
+
+    Only ever True when the command has no shell metacharacters that could
+    chain in a second command AND matches a known-safe single command/prefix.
+    """
+    if _has_shell_metacharacters(command):
+        return False
     cmd_lower = command.strip().lower()
     first_word = cmd_lower.split()[0] if cmd_lower.split() else ""
     if first_word in _READ_ONLY_SINGLE:
         return True
     return any(cmd_lower.startswith(prefix) for prefix in _READ_ONLY_PREFIXES)
+
+
+# Commands that are destructive enough to block outright, even in
+# CMD_MODE=bypass. This is a defense-in-depth backstop, not a substitute for
+# sandboxing — bypass mode should generally not be used outside trusted,
+# disposable environments.
+_HARD_BLOCKED_PATTERNS: tuple[str, ...] = (
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=",
+    ":(){:|:&};:",  # fork bomb
+    "> /dev/sd",
+    "chmod -r 777 /",
+    "shutdown",
+    "reboot",
+)
+
+
+def _is_hard_blocked(command: str) -> bool:
+    cmd_lower = command.strip().lower()
+    return any(pattern in cmd_lower for pattern in _HARD_BLOCKED_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +149,10 @@ async def run_command(command: str) -> str:
     Returns the command output (up to 10 000 characters) or an error string.
     """
     settings = get_settings()
+
+    if _is_hard_blocked(command):
+        return "Error: this command matches a blocked destructive pattern and cannot be executed."
+
     needs_permission = settings.cmd_mode == "permission" and not _is_read_only(command)
 
     if needs_permission:
