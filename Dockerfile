@@ -3,7 +3,7 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# Install build tools needed for some native extensions (chromadb, sentence-transformers)
+# Install build tools needed for some native extensions (psycopg, sentence-transformers)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -28,7 +28,7 @@ COPY rag/ ./rag/
 COPY tools/ ./tools/
 
 # Pre-create data directories so the app can start without volumes attached
-RUN mkdir -p chroma_db conversations logs rag_docs skills workspace
+RUN mkdir -p conversations logs rag_docs skills workspace
 
 # Non-root user for security
 RUN adduser --disabled-password --gecos "" appuser \

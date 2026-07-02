@@ -15,8 +15,8 @@ html2text>=2024.2.26
 numexpr>=2.9.0
 
 # ── RAG ───────────────────────────────────────────────────────────────────────
-chromadb>=0.4.0
-langchain-chroma>=0.1.0
+langchain-postgres>=0.0.12
+psycopg[binary]>=3.1.0
 watchdog>=3.0.0
 pypdf>=3.2.0
 openai>=1.3.0
@@ -25,6 +25,9 @@ openai>=1.3.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 httpx>=0.27.0
+# Optional — only needed to auto-provision a Postgres/pgvector container for
+# tests/test_rag_pg_integration.py. That file skips cleanly without it.
+# testcontainers[postgres]>=4.0.0
 
 langchain-text-splitters
 langchain_experimental

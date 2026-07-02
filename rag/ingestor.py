@@ -7,7 +7,7 @@ Supported sources
 * URL string          — fetched and converted to plain text (requests + html2text)
 
 All text is split with a :class:`RecursiveCharacterTextSplitter` before being
-upserted into ChromaDB with stable, deterministic chunk IDs so that
+upserted into Postgres/pgvector with stable, deterministic chunk IDs so that
 re-ingesting the same source replaces (rather than duplicates) existing chunks.
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 import html2text
@@ -44,7 +45,7 @@ def split_markdown_semantically(markdown_text):
     final_chunks = text_splitter.split_documents(md_header_splits)
     return final_chunks
 
-from rag.chroma_client import get_vectorstore
+from rag.pg_client import get_write_vectorstore
 
 # ---------------------------------------------------------------------------
 # Ingestion manifest — tracks which files have already been ingested so the
@@ -53,15 +54,29 @@ from rag.chroma_client import get_vectorstore
 _MANIFEST_PATH = Path(__file__).parent / ".ingested_manifest.json"
 
 
-def _load_manifest() -> dict[str, float]:
-    """Return the manifest dict mapping resolved path -> mtime."""
+def _load_manifest() -> dict[str, dict]:
+    """Return the manifest dict mapping resolved source -> {"mtime", "chunk_count"}.
+
+    ``chunk_count`` is needed to reconstruct a source's previous deterministic
+    chunk IDs for deletion — see :func:`_delete_source`. Older manifests
+    written before this field existed stored a bare float mtime per source;
+    those entries are transparently upgraded to ``chunk_count: 0`` (meaning
+    "unknown — nothing to delete by ID") rather than raising.
+    """
     try:
-        return json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    manifest: dict[str, dict] = {}
+    for source, value in raw.items():
+        if isinstance(value, dict):
+            manifest[source] = value
+        else:
+            manifest[source] = {"mtime": value, "chunk_count": 0}
+    return manifest
 
 
-def _save_manifest(manifest: dict[str, float]) -> None:
+def _save_manifest(manifest: dict[str, dict]) -> None:
     _MANIFEST_PATH.write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
@@ -71,10 +86,11 @@ def is_file_ingested(path: Path) -> bool:
     """Return True if *path* is already ingested and has not changed since."""
     source = str(path.resolve())
     manifest = _load_manifest()
-    if source not in manifest:
+    entry = manifest.get(source)
+    if entry is None:
         return False
     try:
-        return os.path.getmtime(path) == manifest[source]
+        return os.path.getmtime(path) == entry["mtime"]
     except OSError:
         return False
 
@@ -102,12 +118,23 @@ def _doc_id(source: str, chunk_index: int) -> str:
 
 
 def _delete_source(source: str) -> None:
-    """Remove every existing chunk whose ``source`` metadata matches *source*."""
-    vs = get_vectorstore()
+    """Remove every previously-ingested chunk for *source*.
+
+    Chroma exposed a metadata-filter delete (``_collection.delete(where=...)``)
+    that could remove "everything tagged with this source" without knowing
+    how many chunks existed. PGVector's stable public API deletes by ID
+    instead, so we reconstruct the previous deterministic IDs from the
+    chunk count recorded in the manifest by the prior ingestion.
+    """
+    manifest = _load_manifest()
+    entry = manifest.get(source)
+    if not entry or not entry.get("chunk_count"):
+        return  # nothing previously recorded — not an error
+    ids = [_doc_id(source, i) for i in range(entry["chunk_count"])]
     try:
-        vs._collection.delete(where={"source": source})
+        get_write_vectorstore().delete(ids=ids)
     except Exception:
-        pass  # collection may be empty — not an error
+        pass  # nothing to delete — not an error
 
 
 def _split_and_tag(text: str, source: str, doc_type: str) -> list[Document]:
@@ -208,11 +235,12 @@ def ingest_file(path: Path) -> int:
 
     _delete_source(source)
     ids = [_doc_id(source, i) for i in range(len(docs))]
-    get_vectorstore().add_documents(docs, ids=ids)
+    get_write_vectorstore().add_documents(docs, ids=ids)
 
-    # Update manifest with the file's current mtime
+    # Update manifest with the file's current mtime and chunk count (the
+    # latter is required so a future re-ingest/delete can find these IDs).
     manifest = _load_manifest()
-    manifest[source] = os.path.getmtime(path)
+    manifest[source] = {"mtime": os.path.getmtime(path), "chunk_count": len(docs)}
     _save_manifest(manifest)
 
     return len(docs)
@@ -238,7 +266,14 @@ def ingest_url(url: str) -> int:
 
     _delete_source(url)
     ids = [_doc_id(url, i) for i in range(len(docs))]
-    get_vectorstore().add_documents(docs, ids=ids)
+    get_write_vectorstore().add_documents(docs, ids=ids)
+
+    # URLs have no mtime; record chunk_count (with a timestamp for parity
+    # with file entries) so re-ingesting the same URL cleans up stale chunks.
+    manifest = _load_manifest()
+    manifest[url] = {"mtime": time.time(), "chunk_count": len(docs)}
+    _save_manifest(manifest)
+
     return len(docs)
 
 

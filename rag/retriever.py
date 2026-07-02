@@ -1,14 +1,15 @@
 """Knowledge base retrieval for the RAG module.
 
 Embeds the incoming query and returns the top-K most relevant chunks from
-ChromaDB, formatted as a single string ready to be injected into a prompt.
+Postgres/pgvector (via the read-replica connection), formatted as a single
+string ready to be injected into a prompt.
 """
 from __future__ import annotations
 
 import logging
 
 from config import get_settings
-from rag.chroma_client import get_vectorstore
+from rag.pg_client import get_read_vectorstore
 
 logger = logging.getLogger("rag.retriever")
 
@@ -29,7 +30,7 @@ def retrieve(query: str) -> str:
     Returns an empty string when the knowledge base is empty or an error
     occurs so callers can safely skip prompt injection.
     """
-    vs = get_vectorstore()
+    vs = get_read_vectorstore()
     s = get_settings()
     try:
         results = vs.similarity_search_with_score(query, k=s.rag_top_k)
@@ -40,8 +41,8 @@ def retrieve(query: str) -> str:
     if not results:
         return ""
 
-    # Filter by score threshold — Chroma returns L2 distance (lower = more similar).
-    # Only inject chunks whose distance is at or below the configured threshold.
+    # Filter by score threshold — pgvector distance (lower = more similar,
+    # exact metric depends on the configured distance strategy).
     threshold = s.rag_score_threshold
     results = [(doc, score) for doc, score in results if score <= threshold]
 
@@ -50,6 +51,7 @@ def retrieve(query: str) -> str:
 
     chunks = []
     for doc, _score in results:
-        chunks.append(f"[Score: {_score}]\n{doc.page_content}")
+        source = doc.metadata.get("source", "unknown")
+        chunks.append(f"[Source: {source}]\n{doc.page_content}")
 
     return "\n\n---\n\n".join(chunks)

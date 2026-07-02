@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     logs_dir: str = str(_PROJECT_ROOT / "logs")
     rag_docs_dir: str = str(_PROJECT_ROOT / "rag_docs")
     skills_dir: str = str(_PROJECT_ROOT / "skills")
-    chroma_persist_dir: str = str(_PROJECT_ROOT / "chroma_db")
+    # PGVector, routed through pgbouncer (CNPG). Two DSNs so ingestion (write)
+    # and retrieval (read) can be pointed at the primary vs. read replica(s).
+    db_write_url: str = "postgresql+psycopg://postgres:postgres@localhost:6432/ragdb"
+    db_read_url: str = "postgresql+psycopg://postgres:postgres@localhost:6432/ragdb"
     rag_collection_name: str = "default"
     rag_top_k: int = 5
     rag_score_threshold: float = 1.0
@@ -36,7 +39,7 @@ class Settings(BaseSettings):
     history_max_turns: int = 3  # total turns before compaction triggers
     history_recent_turns: int = 1  # how many recent turns to keep verbatim (must be < max)
 
-    @field_validator("workspace_dir", "logs_dir", "rag_docs_dir", "skills_dir", "chroma_persist_dir", "conversations_dir", mode="before")
+    @field_validator("workspace_dir", "logs_dir", "rag_docs_dir", "skills_dir", "conversations_dir", mode="before")
     @classmethod
     def _resolve_path(cls, v: str) -> str:
         """Resolve relative paths against the project root, not the process cwd."""
