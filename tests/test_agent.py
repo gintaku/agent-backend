@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -347,8 +346,8 @@ async def test_done_not_emitted_on_error():
 
 
 @pytest.mark.asyncio
-async def test_llm_request_and_response_are_logged(tmp_path):
-    log_path = tmp_path / "llm-test.jsonl"
+async def test_llm_request_and_response_are_logged(caplog):
+    """LLM request/response traffic goes through the llm.traffic logger."""
     chat_start = {
         "event": "on_chat_model_start",
         "name": "ChatOpenAI",
@@ -370,7 +369,7 @@ async def test_llm_request_and_response_are_logged(tmp_path):
     with (
         patch("agent._make_llm"),
         patch("agent._make_agent") as MockMakeAgent,
-        patch("agent._get_llm_log_path", return_value=log_path),
+        caplog.at_level("INFO", logger="llm.traffic"),
     ):
         MockMakeAgent.return_value.astream_events = _fake_astream_events(
             chat_start,
@@ -379,12 +378,12 @@ async def test_llm_request_and_response_are_logged(tmp_path):
         )
         await _collect("sess-log", "Log this prompt")
 
-    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-    assert [entry["direction"] for entry in entries] == ["request", "response"]
-    assert entries[0]["session_id"] == "sess-log"
-    assert entries[0]["provider"] == "ChatOpenAI"
-    assert entries[0]["payload"]["messages"][-1]["content"] == "Log this prompt"
-    assert entries[1]["payload"]["content"] == "Logged answer"
+    records = [r for r in caplog.records if r.name == "llm.traffic"]
+    assert [r.direction for r in records] == ["request", "response"]
+    assert records[0].session_id == "sess-log"
+    assert records[0].provider == "ChatOpenAI"
+    assert records[0].payload["messages"][-1]["content"] == "Log this prompt"
+    assert records[1].payload["content"] == "Logged answer"
 
 
 # ---------------------------------------------------------------------------

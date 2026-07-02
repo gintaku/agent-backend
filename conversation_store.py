@@ -16,12 +16,15 @@ Schema:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+
+logger = logging.getLogger("app")
 
 # Session IDs must be alphanumeric + hyphens/underscores, max 128 chars.
 # This prevents path traversal attacks when building file paths.
@@ -98,7 +101,11 @@ def save_conversation(
             existing = json.loads(path.read_text(encoding="utf-8"))
             created_at = existing.get("created_at", now)
         except Exception:
-            pass
+            logger.exception(
+                "Could not read existing conversation file to preserve created_at "
+                "— overwriting with a fresh timestamp",
+                extra={"session_id": session_id},
+            )
 
     data = {
         "id": session_id,
@@ -121,6 +128,10 @@ def load_conversation(session_id: str) -> dict[str, Any] | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        logger.exception(
+            "Failed to load conversation file — treating as missing",
+            extra={"session_id": session_id},
+        )
         return None
 
 
@@ -138,6 +149,10 @@ def list_conversations() -> list[dict[str, Any]]:
                 "updated_at": data.get("updated_at", ""),
             })
         except Exception:
+            logger.exception(
+                "Skipping unreadable conversation file in listing",
+                extra={"file": str(p)},
+            )
             continue
     results.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     return results
@@ -168,4 +183,5 @@ def update_title(session_id: str, title: str) -> bool:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
     except Exception:
+        logger.exception("Failed to update conversation title", extra={"session_id": session_id})
         return False

@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
+import time
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable
 
 from langchain_core.tools import tool
 
 from config import get_settings
+
+#: Dedicated audit trail for every command this tool is asked to run, whether
+#: it executes, is blocked, or is denied. Kept on its own logger name (see
+#: logging_setup.LOG_TYPES) so it can be routed to a separate, longer-retention
+#: Loki bucket independent of general app logs.
+audit_logger = logging.getLogger("audit.shell")
 
 # ---------------------------------------------------------------------------
 # Context variables — injected by the WebSocket handler before running agent
@@ -149,8 +157,13 @@ async def run_command(command: str) -> str:
     Returns the command output (up to 10 000 characters) or an error string.
     """
     settings = get_settings()
+    sid = session_id_var.get() or "-"
 
     if _is_hard_blocked(command):
+        audit_logger.warning(
+            "shell_command_blocked",
+            extra={"session_id": sid, "command": command},
+        )
         return "Error: this command matches a blocked destructive pattern and cannot be executed."
 
     needs_permission = settings.cmd_mode == "permission" and not _is_read_only(command)
@@ -160,6 +173,10 @@ async def run_command(command: str) -> str:
         ws_send = ws_send_var.get()
 
         if ws_send is None or sid is None:
+            audit_logger.warning(
+                "shell_permission_unavailable",
+                extra={"session_id": sid or "-", "command": command},
+            )
             return (
                 "Error: command requires explicit permission but no active WebSocket "
                 "session is available. Set CMD_MODE=bypass to run without prompting."
@@ -169,15 +186,29 @@ async def run_command(command: str) -> str:
         result_holder: dict[str, bool] = {}
         _pending[sid] = (event, result_holder)
 
+        audit_logger.info(
+            "shell_permission_requested",
+            extra={"session_id": sid, "command": command},
+        )
+
         try:
             await ws_send({"type": "permission_request", "command": command})
             await asyncio.wait_for(event.wait(), timeout=60.0)
         except asyncio.TimeoutError:
+            audit_logger.warning(
+                "shell_permission_timeout",
+                extra={"session_id": sid, "command": command},
+            )
             return "Error: permission request timed out (60 s)."
         finally:
             _pending.pop(sid, None)
 
-        if not result_holder.get("approved", False):
+        approved = result_holder.get("approved", False)
+        audit_logger.info(
+            "shell_permission_granted" if approved else "shell_permission_denied",
+            extra={"session_id": sid, "command": command},
+        )
+        if not approved:
             return "Command denied by user."
 
     # -----------------------------------------------------------------------
@@ -185,7 +216,7 @@ async def run_command(command: str) -> str:
     # -----------------------------------------------------------------------
     import subprocess
 
-    def _run() -> str:
+    def _run() -> tuple[str, int | None]:
         try:
             result = subprocess.run(
                 command,
@@ -199,13 +230,35 @@ async def run_command(command: str) -> str:
             output = output.strip()
             if len(output) > 10_000:
                 output = output[:10_000] + "\n…(output truncated)"
-            return output or "(no output)"
+            return output or "(no output)", result.returncode
         except subprocess.TimeoutExpired:
-            return "Error: command timed out after 30 seconds."
+            return "Error: command timed out after 30 seconds.", None
         except Exception as exc:  # noqa: BLE001
-            return f"Error running command: {exc}"
+            return f"Error running command: {exc}", None
 
+    start = time.monotonic()
     try:
-        return await asyncio.to_thread(_run)
+        output, returncode = await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
+        audit_logger.exception(
+            "shell_command_error",
+            extra={"session_id": sid, "command": command},
+        )
         return f"Error running command: {exc}"
+
+    duration_ms = round((time.monotonic() - start) * 1000, 1)
+    # Deliberately omit the raw output from the audit record — it may contain
+    # secrets echoed by the command (env vars, file contents, API responses).
+    # The command itself, exit status, and output size are enough for an
+    # audit trail without duplicating a second copy of sensitive data.
+    audit_logger.info(
+        "shell_command_executed",
+        extra={
+            "session_id": sid,
+            "command": command,
+            "returncode": returncode,
+            "output_chars": len(output),
+            "duration_ms": duration_ms,
+        },
+    )
+    return output

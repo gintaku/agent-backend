@@ -5,8 +5,12 @@ ChromaDB, formatted as a single string ready to be injected into a prompt.
 """
 from __future__ import annotations
 
+import logging
+
 from config import get_settings
 from rag.chroma_client import get_vectorstore
+
+logger = logging.getLogger("rag.retriever")
 
 
 def retrieve(query: str) -> str:
@@ -30,6 +34,7 @@ def retrieve(query: str) -> str:
     try:
         results = vs.similarity_search_with_score(query, k=s.rag_top_k)
     except Exception:
+        logger.exception("RAG retrieval failed — continuing without context")
         return ""
 
     if not results:

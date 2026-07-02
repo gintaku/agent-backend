@@ -1,9 +1,7 @@
 """LangChain tool-calling agent with per-session chat history and WebSocket streaming."""
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
+import logging
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -15,6 +13,8 @@ from config import get_settings
 from rag.retriever import retrieve as rag_retrieve
 from skills_loader import load_skills
 from tools import ALL_TOOLS
+
+logger = logging.getLogger("app")
 
 # ---------------------------------------------------------------------------
 # Per-session chat history  {session_id: [HumanMessage, AIMessage, ...]}
@@ -48,13 +48,10 @@ SYSTEM_PROMPT = (
 )
 
 
-def _get_llm_log_path() -> Path:
-    """Return the daily JSONL log file for LLM request/response logging."""
-    settings = get_settings()
-    log_dir = Path(settings.logs_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return log_dir / f"llm-{stamp}.jsonl"
+#: Dedicated logger for LLM request/response traffic. Kept separate from the
+#: "app" logger (see logging_setup.LOG_TYPES) so it can be routed to its own
+#: Loki bucket via a pipeline stage that promotes log_type to a stream label.
+_llm_logger = logging.getLogger("llm.traffic")
 
 
 def _serialize_message(message: BaseMessage) -> dict[str, Any]:
@@ -94,12 +91,34 @@ def _serialize_for_log(value: Any) -> Any:
     return str(value)
 
 
-def _append_llm_log(entry: dict[str, Any]) -> None:
-    """Append one JSON entry describing LLM traffic to the daily log file."""
-    log_path = _get_llm_log_path()
-    with log_path.open("a", encoding="utf-8") as log_file:
-        json.dump(entry, log_file, ensure_ascii=True, default=str)
-        log_file.write("\n")
+def _log_llm_traffic(
+    *,
+    turn_id: str,
+    session_id: str,
+    direction: str,
+    provider: str,
+    payload: Any = None,
+    error: str | None = None,
+) -> None:
+    """Emit one structured LLM request/response/error event.
+
+    Goes through the standard logging pipeline (JSON to stdout) rather than a
+    hand-rolled file, so it gets the same timestamp/session_id handling as
+    everything else, doesn't block the event loop on file I/O, and — via the
+    "llm.traffic" logger name — can be routed to its own Loki stream.
+    """
+    extra: dict[str, Any] = {
+        "turn_id": turn_id,
+        "session_id": session_id,
+        "direction": direction,
+        "provider": provider,
+        "model": get_settings().model,
+    }
+    if payload is not None:
+        extra["payload"] = _serialize_for_log(payload)
+    if error is not None:
+        extra["error"] = error
+    _llm_logger.info("llm_%s", direction, extra=extra)
 
 
 def get_history(session_id: str) -> list[BaseMessage]:
@@ -169,16 +188,12 @@ async def _maybe_compact_history(
 
     summarize_turn_id = str(uuid4())
     summarize_messages = [HumanMessage(content=prompt)]
-    _append_llm_log(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "turn_id": summarize_turn_id,
-            "session_id": session_id,
-            "direction": "request",
-            "model": get_settings().model,
-            "provider": "summarize",
-            "payload": _serialize_for_log({"messages": [summarize_messages]}),
-        }
+    _log_llm_traffic(
+        turn_id=summarize_turn_id,
+        session_id=session_id,
+        direction="request",
+        provider="summarize",
+        payload={"messages": [summarize_messages]},
     )
 
     summary_response = await llm.ainvoke(summarize_messages)
@@ -196,16 +211,12 @@ async def _maybe_compact_history(
     else:
         summary_text = str(summary_response.content).strip()
 
-    _append_llm_log(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "turn_id": summarize_turn_id,
-            "session_id": session_id,
-            "direction": "response",
-            "model": get_settings().model,
-            "provider": "summarize",
-            "payload": {"type": "ai", "content": summary_text},
-        }
+    _log_llm_traffic(
+        turn_id=summarize_turn_id,
+        session_id=session_id,
+        direction="response",
+        provider="summarize",
+        payload={"type": "ai", "content": summary_text},
     )
 
     history[:] = [SystemMessage(content=f"Conversation summary:\n{summary_text}")] + recent_pairs
@@ -283,6 +294,7 @@ async def run_agent(
     final_answer = ""
     error_occurred = False
     turn_id = uuid4().hex
+    logger.info("Agent turn started", extra={"session_id": session_id, "turn_id": turn_id})
 
     # Build the input messages: existing history + new human turn.
     valid_images = [
@@ -322,16 +334,12 @@ async def run_agent(
             name = event.get("name", "")
 
             if kind == "on_chat_model_start":
-                _append_llm_log(
-                    {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "turn_id": turn_id,
-                        "session_id": session_id,
-                        "direction": "request",
-                        "model": get_settings().model,
-                        "provider": name,
-                        "payload": _serialize_for_log(event["data"].get("input", {})),
-                    }
+                _log_llm_traffic(
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    direction="request",
+                    provider=name,
+                    payload=event["data"].get("input", {}),
                 )
 
             elif kind == "on_chat_model_stream":
@@ -347,16 +355,12 @@ async def run_agent(
                                 await ws_send({"type": "token", "content": text})
 
             elif kind == "on_chat_model_end":
-                _append_llm_log(
-                    {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "turn_id": turn_id,
-                        "session_id": session_id,
-                        "direction": "response",
-                        "model": get_settings().model,
-                        "provider": name,
-                        "payload": _serialize_for_log(event["data"].get("output")),
-                    }
+                _log_llm_traffic(
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    direction="response",
+                    provider=name,
+                    payload=event["data"].get("output"),
                 )
 
             elif kind == "on_tool_start":
@@ -396,15 +400,16 @@ async def run_agent(
 
     except Exception as exc:  # noqa: BLE001
         error_occurred = True
-        _append_llm_log(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+        _llm_logger.exception(
+            "llm_error",
+            extra={
                 "turn_id": turn_id,
                 "session_id": session_id,
                 "direction": "error",
+                "provider": "agent",
                 "model": get_settings().model,
                 "error": str(exc),
-            }
+            },
         )
         await ws_send({"type": "error", "content": str(exc)})
 
@@ -416,4 +421,5 @@ async def run_agent(
         # Persist this turn in the session history.
         history.append(HumanMessage(content=user_message))
         history.append(AIMessage(content=final_answer))
+        logger.info("Agent turn completed", extra={"session_id": session_id, "turn_id": turn_id})
         await ws_send({"type": "done"})

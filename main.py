@@ -12,8 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import get_settings, reset_settings, update_env_file
+from logging_setup import configure_logging, session_id_ctx
 
-logger = logging.getLogger(__name__)
+# Configure structured JSON logging as early as possible, before any other
+# module (rag.ingestor, rag.watcher, agent, ...) has a chance to log.
+configure_logging(get_settings().log_level)
+
+logger = logging.getLogger("app")
 
 _SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf"}
 
@@ -33,19 +38,17 @@ async def lifespan(app: FastAPI):
     # Scan and ingest only new/changed files present in rag_docs/
     def _startup_ingest() -> None:
         from rag.ingestor import is_file_ingested
-        print(f"Scanning {rag_docs_dir} for new or changed files...")
+        logger.info("RAG startup: scanning for new or changed files", extra={"dir": str(rag_docs_dir)})
         for p in rag_docs_dir.rglob("*"):
             if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES:
                 if is_file_ingested(p):
-                    print(f"Skipping (already ingested): {p}")
+                    logger.debug("RAG startup: already ingested, skipping", extra={"file": str(p)})
                     continue
                 try:
-                    print(f"Ingesting {p}...")
                     n = ingest_file(p)
-                    logger.info("RAG startup: ingested %d chunk(s) from %s", n, p)
-                except Exception as exc:
-                    print(f"Error ingesting {p}: {exc}")
-                    logger.warning("RAG startup: skipped %s — %s", p, exc)
+                    logger.info("RAG startup: ingested file", extra={"file": str(p), "chunks": n})
+                except Exception:
+                    logger.exception("RAG startup: failed to ingest file", extra={"file": str(p)})
 
     await asyncio.get_event_loop().run_in_executor(None, _startup_ingest)
 
@@ -168,13 +171,17 @@ async def _run_agent_safe(
     """Run the agent, catching any unhandled exception into an error event."""
     from agent import run_agent  # local import avoids circular dependency at startup
 
+    token = session_id_ctx.set(session_id)
     try:
         await run_agent(session_id, content, ws_send, images)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Unhandled error while running agent turn")
         try:
             await ws_send({"type": "error", "content": str(exc)})
         except Exception:
-            pass
+            logger.warning("Failed to deliver error event — client likely disconnected")
+    finally:
+        session_id_ctx.reset(token)
 
 
 @app.websocket("/ws/{session_id}")
@@ -209,7 +216,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Received malformed WS message, ignoring",
+                    extra={"session_id": session_id, "raw_preview": raw[:200]},
+                )
+                continue
             msg_type = msg.get("type")
 
             if msg_type in {"message", "token"}:

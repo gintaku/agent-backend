@@ -51,17 +51,17 @@ class _RAGEventHandler(FileSystemEventHandler):
             return
         try:
             n = ingest_file(p)
-            logger.info("RAG: ingested %d chunk(s) from %s", n, path)
-        except Exception as exc:
-            logger.error("RAG: failed to ingest %s — %s", path, exc)
+            logger.info("RAG: ingested file", extra={"file": path, "chunks": n})
+        except Exception:
+            logger.exception("RAG: failed to ingest file", extra={"file": path})
 
     def _delete(self, path: str) -> None:
         source = str(Path(path).resolve())
         try:
             delete_source(source)
-            logger.info("RAG: removed chunks for deleted file %s", path)
-        except Exception as exc:
-            logger.error("RAG: failed to remove chunks for %s — %s", path, exc)
+            logger.info("RAG: removed chunks for deleted file", extra={"file": path})
+        except Exception:
+            logger.exception("RAG: failed to remove chunks for file", extra={"file": path})
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -103,5 +103,5 @@ def start_watcher() -> Observer:
     observer = Observer()
     observer.schedule(handler, str(watch_dir), recursive=True)
     observer.start()
-    logger.info("RAG watcher started on %s", watch_dir)
+    logger.info("RAG watcher started", extra={"watch_dir": str(watch_dir)})
     return observer

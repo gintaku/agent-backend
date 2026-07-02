@@ -19,6 +19,7 @@ ENV_FILE: Path = _DEFAULT_ENV_FILE
 class Settings(BaseSettings):
     openrouter_api_key: str = "sk-placeholder"
     model: str = "gemini-2.0-flash"
+    log_level: str = "INFO"  # DEBUG/INFO/WARNING/ERROR, overridable via LOG_LEVEL env var
     cmd_mode: Literal["bypass", "permission"] = "permission"
     workspace_dir: str = str(_PROJECT_ROOT / "workspace")
     logs_dir: str = str(_PROJECT_ROOT / "logs")
