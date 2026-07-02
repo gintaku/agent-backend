@@ -30,9 +30,9 @@ def retrieve(query: str) -> str:
     Returns an empty string when the knowledge base is empty or an error
     occurs so callers can safely skip prompt injection.
     """
-    vs = get_read_vectorstore()
     s = get_settings()
     try:
+        vs = get_read_vectorstore()
         results = vs.similarity_search_with_score(query, k=s.rag_top_k)
     except Exception:
         logger.exception("RAG retrieval failed — continuing without context")

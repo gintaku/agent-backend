@@ -71,6 +71,20 @@ def _clear_history():
     agent._chat_histories.clear()
 
 
+@pytest.fixture(autouse=True)
+def _stub_rag_retrieve(monkeypatch):
+    """Stub out RAG retrieval for all agent-orchestration tests.
+
+    These tests exercise run_agent's event emission / history handling, not
+    the RAG subsystem (which has its own dedicated tests in
+    test_rag_retriever.py etc.). Previously this worked "by accident" —
+    Chroma's in-memory mode made an empty-KB lookup free and instant. Now
+    that retrieval hits Postgres, a live database would be an implicit,
+    unmocked dependency of every agent test. Stub it explicitly instead.
+    """
+    monkeypatch.setattr("agent.rag_retrieve", lambda query: "")
+
+
 # ---------------------------------------------------------------------------
 # History management (sync)
 # ---------------------------------------------------------------------------
@@ -600,4 +614,3 @@ async def test_no_history_compacted_event_below_threshold():
         events = await _collect("sess-no-compact", "hello")
 
     assert not any(e["type"] == "history_compacted" for e in events)
-

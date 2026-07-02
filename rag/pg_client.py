@@ -8,6 +8,16 @@ must always go through :func:`get_read_vectorstore`.
 Only the write instance is allowed to trigger schema creation: PGVector
 creates its collection/embedding tables lazily on first use, and that DDL
 should never happen against a read replica.
+
+Note: even with ``create_extension=False``, PGVector's constructor still
+issues a couple of lightweight statements on first use — a checkfirst
+``CREATE TABLE IF NOT EXISTS`` (a no-op once the write store has already
+created the tables) and a SELECT-or-INSERT for the collection row (a no-op
+once that row exists). Both are harmless once the write store has ingested
+at least once, but until then, constructing the read store can still fail
+against a genuine read-only replica. Callers must treat any failure from
+:func:`get_read_vectorstore` (construction *or* query) as "no context
+available" rather than a hard error — see ``rag/retriever.py``.
 """
 from __future__ import annotations
 
@@ -43,7 +53,10 @@ def get_read_vectorstore() -> PGVector:
 
     Used for retrieval only. Assumes the schema already exists — call
     :func:`get_write_vectorstore` at least once (e.g. via startup ingestion)
-    before relying on this in a fresh environment.
+    before relying on this in a fresh environment. ``create_extension=False``
+    is deliberate: a genuine Postgres read replica rejects DDL outright
+    (``CREATE EXTENSION`` included), so this instance must never attempt it —
+    only the write store is allowed to.
     """
     global _read_store
     if _read_store is None:
@@ -53,6 +66,7 @@ def get_read_vectorstore() -> PGVector:
             collection_name=s.rag_collection_name,
             connection=s.db_read_url,
             use_jsonb=True,
+            create_extension=False,
         )
     return _read_store
 
