@@ -1,33 +1,47 @@
-"""Persistence layer for conversation history.
+"""Persistence layer for conversation history — backed by Postgres.
 
-Each conversation is stored as a JSON file:
-  {conversations_dir}/{session_id}.json
+Conversations are stored in the ``conversations`` table (see
+``db/models.py``), in the same Postgres database used by the RAG pipeline —
+just a different table, with its own Alembic-managed schema (see
+``alembic/``). This module assumes the table already exists; it does not
+create it (run ``alembic upgrade head`` as part of deployment/startup).
 
-Schema:
-{
-  "id": "<session_id>",
-  "title": "First user message...",
-  "created_at": "ISO-8601",
-  "updated_at": "ISO-8601",
-  "lc_messages": [...],   # serialized LangChain messages for context restoration
-  "ui_messages": [...]    # raw frontend message dicts for display restoration
-}
+There's no auth/user module yet, so every conversation is tagged with a
+``user`` column that defaults to ``"admin"``. Every public function here
+accepts an optional ``user`` argument for forward compatibility — once a
+real auth module exists, callers just start passing the actual user id and
+nothing else about this module needs to change.
+
+Schema (unchanged from the old per-file JSON layout, just relocated):
+  id            session_id (primary key)
+  user          owner of the conversation (default "admin")
+  title         display title
+  created_at    tz-aware timestamp, preserved across updates
+  updated_at    tz-aware timestamp, bumped on every write
+  lc_messages   serialized LangChain messages (context restoration), JSONB
+  ui_messages   raw frontend message dicts (display restoration), JSONB
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+
+from db.engine import get_read_session, get_write_session
+from db.models import DEFAULT_USER, Conversation
 
 logger = logging.getLogger("app")
 
 # Session IDs must be alphanumeric + hyphens/underscores, max 128 chars.
-# This prevents path traversal attacks when building file paths.
+# Kept even though Postgres parameterizes values (no SQL-injection risk via
+# the ORM) — this is the primary key's own format contract, and it's cheap
+# insurance against silently accepting garbage session ids from the client.
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
@@ -36,20 +50,8 @@ def _validate_session_id(session_id: str) -> None:
         raise ValueError(f"Invalid session_id: {session_id!r}")
 
 
-def _conversations_dir() -> Path:
-    from config import get_settings
-    d = Path(get_settings().conversations_dir)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _conv_path(session_id: str) -> Path:
-    _validate_session_id(session_id)
-    return _conversations_dir() / f"{session_id}.json"
-
-
 # ---------------------------------------------------------------------------
-# Serialization helpers
+# Serialization helpers (unchanged — no storage dependency)
 # ---------------------------------------------------------------------------
 
 def serialize_lc_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
@@ -90,98 +92,150 @@ def save_conversation(
     title: str,
     lc_messages: list[dict[str, Any]],
     ui_messages: list[dict[str, Any]],
+    user: str = DEFAULT_USER,
 ) -> None:
-    path = _conv_path(session_id)
-    now = datetime.now(timezone.utc).isoformat()
+    """Create or update a conversation row.
 
-    # Preserve created_at if file already exists
-    created_at = now
-    if path.exists():
+    ``created_at`` is preserved across updates (only set when the row is
+    first created) — same behavior the old JSON-file version had.
+    """
+    _validate_session_id(session_id)
+    now = datetime.now(timezone.utc)
+
+    with get_write_session() as session:
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            created_at = existing.get("created_at", now)
-        except Exception:
+            conv = session.get(Conversation, session_id)
+            if conv is None:
+                conv = Conversation(
+                    id=session_id,
+                    user=user,
+                    title=title,
+                    created_at=now,
+                    updated_at=now,
+                    lc_messages=lc_messages,
+                    ui_messages=ui_messages,
+                )
+                session.add(conv)
+            else:
+                conv.title = title
+                conv.updated_at = now
+                conv.lc_messages = lc_messages
+                conv.ui_messages = ui_messages
+            session.commit()
+        except SQLAlchemyError:
+            session.rollback()
             logger.exception(
-                "Could not read existing conversation file to preserve created_at "
-                "— overwriting with a fresh timestamp",
-                extra={"session_id": session_id},
+                "Failed to save conversation", extra={"session_id": session_id}
             )
-
-    data = {
-        "id": session_id,
-        "title": title,
-        "created_at": created_at,
-        "updated_at": now,
-        "lc_messages": lc_messages,
-        "ui_messages": ui_messages,
-    }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            raise
 
 
 def load_conversation(session_id: str) -> dict[str, Any] | None:
     try:
-        path = _conv_path(session_id)
+        _validate_session_id(session_id)
     except ValueError:
         return None
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.exception(
-            "Failed to load conversation file — treating as missing",
-            extra={"session_id": session_id},
-        )
-        return None
 
-
-def list_conversations() -> list[dict[str, Any]]:
-    """Return conversation metadata sorted by updated_at descending."""
-    results = []
-    d = _conversations_dir()
-    for p in d.glob("*.json"):
+    with get_read_session() as session:
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            results.append({
-                "id": data.get("id", p.stem),
-                "title": data.get("title", "Untitled"),
-                "created_at": data.get("created_at", ""),
-                "updated_at": data.get("updated_at", ""),
-            })
-        except Exception:
+            conv = session.get(Conversation, session_id)
+        except SQLAlchemyError:
             logger.exception(
-                "Skipping unreadable conversation file in listing",
-                extra={"file": str(p)},
+                "Failed to load conversation — treating as missing",
+                extra={"session_id": session_id},
             )
-            continue
-    results.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-    return results
+            return None
+
+    if conv is None:
+        return None
+
+    return {
+        "id": conv.id,
+        "user": conv.user,
+        "title": conv.title,
+        "created_at": conv.created_at.isoformat(),
+        "updated_at": conv.updated_at.isoformat(),
+        "lc_messages": conv.lc_messages,
+        "ui_messages": conv.ui_messages,
+    }
 
 
-def delete_conversation(session_id: str) -> bool:
+def list_conversations(user: str = DEFAULT_USER) -> list[dict[str, Any]]:
+    """Return conversation metadata for *user*, sorted by updated_at descending."""
+    with get_read_session() as session:
+        try:
+            rows = (
+                session.execute(
+                    select(Conversation)
+                    .where(Conversation.user == user)
+                    .order_by(Conversation.updated_at.desc())
+                )
+                .scalars()
+                .all()
+            )
+        except SQLAlchemyError:
+            logger.exception("Failed to list conversations", extra={"user": user})
+            return []
+
+    return [
+        {
+            "id": c.id,
+            "title": c.title,
+            "created_at": c.created_at.isoformat(),
+            "updated_at": c.updated_at.isoformat(),
+        }
+        for c in rows
+    ]
+
+
+def delete_conversation(session_id: str, user: str = DEFAULT_USER) -> bool:  # noqa: ARG001
+    """Delete a conversation by id.
+
+    ``user`` is accepted for API symmetry with the other functions but not
+    yet enforced as an ownership check (no auth module to trust it against
+    yet) — once one exists, add a ``.where(Conversation.user == user)``
+    clause here to prevent deleting another user's conversation.
+    """
     try:
-        path = _conv_path(session_id)
+        _validate_session_id(session_id)
     except ValueError:
         return False
-    if path.exists():
-        path.unlink()
-        return True
-    return False
+
+    with get_write_session() as session:
+        try:
+            result = session.execute(
+                sa_delete(Conversation).where(Conversation.id == session_id)
+            )
+            session.commit()
+        except SQLAlchemyError:
+            session.rollback()
+            logger.exception(
+                "Failed to delete conversation", extra={"session_id": session_id}
+            )
+            return False
+
+    return result.rowcount > 0
 
 
-def update_title(session_id: str, title: str) -> bool:
+def update_title(session_id: str, title: str, user: str = DEFAULT_USER) -> bool:  # noqa: ARG001
+    """Rename a conversation. See delete_conversation's note on ``user``."""
     try:
-        path = _conv_path(session_id)
+        _validate_session_id(session_id)
     except ValueError:
         return False
-    if not path.exists():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["title"] = title
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True
-    except Exception:
-        logger.exception("Failed to update conversation title", extra={"session_id": session_id})
-        return False
+
+    with get_write_session() as session:
+        try:
+            conv = session.get(Conversation, session_id)
+            if conv is None:
+                return False
+            conv.title = title
+            conv.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            return True
+        except SQLAlchemyError:
+            session.rollback()
+            logger.exception(
+                "Failed to update conversation title", extra={"session_id": session_id}
+            )
+            return False

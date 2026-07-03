@@ -26,8 +26,18 @@ COPY --from=builder /install /usr/local
 COPY agent.py config.py conversation_store.py main.py skills_loader.py ./
 COPY rag/ ./rag/
 COPY tools/ ./tools/
+COPY db/ ./db/
 
-# Pre-create data directories so the app can start without volumes attached
+# Alembic migrations for the conversations table (same Postgres instance as
+# RAG). Run `alembic upgrade head` as a release step / init container before
+# the app starts — this image intentionally does not auto-migrate on boot.
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+
+# Pre-create data directories so the app can start without volumes attached.
+# conversations/ is no longer written to (that data now lives in Postgres —
+# see conversation_store.py) but is left here harmlessly in case anything
+# still expects the path to exist.
 RUN mkdir -p conversations logs rag_docs skills workspace
 
 # Non-root user for security
