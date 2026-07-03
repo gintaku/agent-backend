@@ -13,9 +13,32 @@ from langchain_core.documents import Document
 
 
 @pytest.fixture(autouse=True)
-def _reset_settings_cache():
-    """Clear the Settings singleton before and after every test for isolation."""
-    import config  # noqa: PLC0415
+def _reset_settings_cache(tmp_path, monkeypatch):
+    """Clear the Settings singleton before/after every test, AND make sure
+    Settings() never reads the developer's real backend/.env file.
+
+    config.py hardcodes model_config["env_file"] to the real backend/.env
+    path at class-definition time. pydantic-settings' source priority is
+    process env vars > .env file > class defaults, so any test that does
+    monkeypatch.delenv("SOME_KEY") to exercise the "unset -> class default"
+    path was actually falling through to whatever SOME_KEY happens to be
+    set to in the developer's local .env — not the class default. That
+    makes the test's outcome depend on machine-local, untracked file state
+    instead of the code under test.
+
+    Pointing env_file at a tmp_path file that deliberately does not exist
+    removes that hidden dependency for the whole suite in one place, rather
+    than requiring every individual test to route around it.
+    """
+    import config
+
+    fake_env_file = tmp_path / ".env"  # intentionally never created
+    monkeypatch.setattr(
+        config.Settings,
+        "model_config",
+        {**config.Settings.model_config, "env_file": str(fake_env_file)},
+    )
+
     config.reset_settings()
     yield
     config.reset_settings()

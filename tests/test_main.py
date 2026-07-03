@@ -214,7 +214,15 @@ def test_websocket_message_type_dispatches_to_agent(client, monkeypatch):
     import config
     config.reset_settings()
 
-    async def _fake_run_agent(session_id, content, ws_send):
+    # NOTE: main.py's websocket handler calls
+    #   asyncio.create_task(_run_agent_safe(session_id, content, ws_send, images))
+    # i.e. it always passes 4 positional args (images was added for the
+    # multimodal / image-upload feature). This fake's signature must match
+    # that call site — mismatched signatures raise TypeError *synchronously*
+    # inside the WS receive loop, which only catches WebSocketDisconnect, so
+    # the connection silently dies and ws.receive_json() below hangs forever
+    # instead of failing with a clear error.
+    async def _fake_run_agent(session_id, content, ws_send, images=None):
         await ws_send({"type": "done"})
 
     with patch("main._run_agent_safe", side_effect=_fake_run_agent):

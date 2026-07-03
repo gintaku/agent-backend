@@ -9,22 +9,33 @@ from pydantic import ValidationError
 # get_settings / reset_settings
 # ---------------------------------------------------------------------------
 
-def test_default_model_value(monkeypatch):
+def test_default_model_value(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.delenv("MODEL", raising=False)
     monkeypatch.delenv("CMD_MODE", raising=False)
 
     import config
-    s = config.get_settings()
-    assert s.model == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+
+    # get_settings()/Settings() otherwise reads the real backend/.env file on
+    # disk (via model_config["env_file"]), so deleting MODEL from os.environ
+    # alone does NOT isolate this test — if the real .env sets MODEL, that
+    # value wins over the class default and this assertion becomes a coin
+    # flip depending on the developer's local .env contents.
+    #
+    # pydantic-settings supports a private `_env_file` init kwarg specifically
+    # to override which env file an instance reads, without needing to
+    # monkeypatch model_config (which is a dict/TypedDict at runtime and does
+    # not support attribute assignment).
+    s = config.Settings(_env_file=str(tmp_path / ".env"))
+    assert s.model == "gemini-2.0-flash"
 
 
-def test_default_cmd_mode_is_permission(monkeypatch):
+def test_default_cmd_mode_is_permission(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.delenv("CMD_MODE", raising=False)
 
     import config
-    s = config.get_settings()
+    s = config.Settings(_env_file=str(tmp_path / ".env"))
     assert s.cmd_mode == "permission"
 
 
